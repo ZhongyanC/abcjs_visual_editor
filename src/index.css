@@ -1,0 +1,56 @@
+/* abcjs audio controls — must come before other CSS rules */
+@import 'abcjs/abcjs-audio.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+}
+
+/* Score display */
+.score-container svg {
+  width: 100%;
+  height: auto;
+}
+
+/* abcjs cursor highlight */
+.abcjs-cursor {
+  stroke: #0078d4 !important;
+  fill: rgba(0, 120, 212, 0.15) !important;
+}
+
+/* Selected note in score */
+.abcjs-note_selected * {
+  fill: #0078d4 !important;
+  stroke: #0078d4 !important;
+}
+
+/* Toolbar button base style */
+@layer components {
+  .tb-btn {
+    @apply inline-flex items-center justify-center w-8 h-8 rounded text-white
+           hover:bg-toolbar-hover active:bg-toolbar-active transition-colors
+           disabled:opacity-40 disabled:cursor-not-allowed text-xs;
+  }
+  .tb-btn-active {
+    @apply bg-toolbar-active;
+  }
+  .tb-separator {
+    @apply w-px h-6 bg-gray-600 mx-1;
+  }
+  .input-field {
+    @apply w-full border border-gray-300 rounded px-2 py-1 text-xs text-gray-800
+           focus:outline-none focus:border-blue-400 bg-white;
+  }
+}
