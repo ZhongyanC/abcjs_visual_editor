@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { useEditorStore } from '../../store/editorStore'
-import { insertNoteAt, autoBarlines } from '../../utils/abcStringOps'
+import { insertNoteAt, autoBarlines, autoBeaming, addNoteToChord, parseLValue, parseMetadata } from '../../utils/abcStringOps'
 import { yToPitch, getStaffAtY, xToInsertPosition, getSvgCoords, pitchToSvgY } from '../../utils/staffMapper'
+import { buildNoteToken } from '../../utils/noteFormat'
+import { DURATION_MULTIPLIER } from '../../types/abc'
 import type { PositionedElement, StaffGeometry } from '../../types/abc'
 
 interface ScoreOverlayProps {
@@ -80,11 +82,31 @@ export function ScoreOverlay({ svgEl, positions, staves }: ScoreOverlayProps) {
       note = p.note; octave = p.octave
     }
 
-    // Filter by voice so clicking bass staff inserts into the bass voice, etc.
+    // Check if the click lands on an existing note with the same duration → chord
+    if (!inputRest) {
+      const voicePositions = staff != null
+        ? positions.filter(el => el.voiceIndex === staff.voiceIndex)
+        : positions
+      const hit = voicePositions.find(
+        el => el.type === 'note' && coords.x >= el.x && coords.x <= el.x + el.w
+      )
+      if (hit && hit.duration !== undefined) {
+        const metadata = parseMetadata(abcNotation)
+        const lValue = parseLValue(metadata.defaultNoteLength || '1/8')
+        const inputWhole = DURATION_MULTIPLIER[inputDuration] * lValue * (inputDot ? 1.5 : 1)
+        if (Math.abs(hit.duration - inputWhole) < 1e-6) {
+          const newToken = buildNoteToken(note, octave, inputDuration, inputDot, inputAccidental, false)
+          setAbcNotation(autoBeaming(autoBarlines(addNoteToChord(abcNotation, hit.startChar, hit.endChar, newToken))))
+          return
+        }
+      }
+    }
+
+    // Default: insert at horizontal position
     const insertPos = xToInsertPosition(coords.x, positions, staff?.voiceIndex)
     const pos = insertPos >= 0 ? insertPos : abcNotation.trimEnd().length
 
-    setAbcNotation(autoBarlines(insertNoteAt(abcNotation, pos, note, octave, inputDuration, inputDot, inputAccidental, inputRest)))
+    setAbcNotation(autoBeaming(autoBarlines(insertNoteAt(abcNotation, pos, note, octave, inputDuration, inputDot, inputAccidental, inputRest))))
   }
 
   // ── Overlay positioning ───────────────────────────────────────────────────

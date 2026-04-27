@@ -229,6 +229,7 @@ export function buildPositionIndex(tuneObj: unknown): PositionedElement[] {
             startChar?: number
             endChar?: number
             el_type?: string
+            duration?: number
           }
         }
         svgEl?: Element
@@ -264,10 +265,54 @@ export function buildPositionIndex(tuneObj: unknown): PositionedElement[] {
       type:      abcelem.el_type ?? '',
       voiceIndex,
       measureNum: 0,
+      duration:  abcelem.duration,
     })
   }
 
   return result
+}
+
+/**
+ * Return the first .abcjs-decoration SVG element whose bbox contains (svgX, svgY),
+ * or null if none.
+ */
+export function findDecorationAtClick(
+  svgEl: SVGElement,
+  svgX: number,
+  svgY: number,
+): SVGGraphicsElement | null {
+  const els = svgEl.querySelectorAll<SVGGraphicsElement>('.abcjs-decoration')
+  for (const el of els) {
+    const bb = el.getBBox?.()
+    if (!bb) continue
+    if (svgX >= bb.x && svgX <= bb.x + bb.width &&
+        svgY >= bb.y && svgY <= bb.y + bb.height) {
+      return el
+    }
+  }
+  return null
+}
+
+/**
+ * Given a decoration SVG element, find the PositionedElement (note) it belongs to
+ * by matching its horizontal centre to the nearest note in `positions`.
+ */
+export function findNoteForDecoration(
+  decorEl: SVGGraphicsElement,
+  positions: PositionedElement[],
+): PositionedElement | null {
+  const bb = decorEl.getBBox?.()
+  if (!bb) return null
+  const cx = bb.x + bb.width / 2
+
+  let best: PositionedElement | null = null
+  let bestDist = Infinity
+  for (const p of positions) {
+    if (p.type !== 'note') continue
+    const dist = Math.abs(p.x + p.w / 2 - cx)
+    if (dist < bestDist) { bestDist = dist; best = p }
+  }
+  return bestDist < 30 ? best : null
 }
 
 /**

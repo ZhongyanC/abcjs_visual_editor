@@ -169,6 +169,14 @@ export const useEditorStore = create<EditorState>()(
         voices: state.voices,
         tempo: state.tempo,
       }),
+      merge: (persisted: unknown, current) => {
+        const p = persisted as Partial<typeof current>
+        return {
+          ...current,
+          ...p,
+          layout: { ...DEFAULT_LAYOUT, ...(p.layout ?? {}) },
+        }
+      },
     }
   )
 )

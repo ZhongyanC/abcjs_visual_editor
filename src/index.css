@@ -1,6 +1,14 @@
 /* abcjs audio controls — must come before other CSS rules */
 @import 'abcjs/abcjs-audio.css';
 
+@font-face {
+  font-family: 'Leland';
+  src: url('/fonts/Leland.otf') format('opentype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: block;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -30,10 +38,11 @@ html, body, #root {
   fill: rgba(0, 120, 212, 0.15) !important;
 }
 
-/* Selected note in score */
-.abcjs-note_selected * {
-  fill: #0078d4 !important;
-  stroke: #0078d4 !important;
+/* Selected note in score — colour is applied via SVG fill/stroke attributes
+   by useAbcRenderer; we only suppress the browser focus ring here. */
+svg [tabindex]:focus,
+svg [tabindex]:focus-visible {
+  outline: none;
 }
 
 /* Toolbar button base style */

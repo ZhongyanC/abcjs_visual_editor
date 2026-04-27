@@ -1,7 +1,7 @@
 import * as abcjs from 'abcjs'
 import type { TuneMetadata, VoiceConfig } from '../types/editor'
 import type { Duration, Accidental } from '../types/editor'
-import { buildNoteToken } from './noteFormat'
+import { buildNoteToken, pitchToAbcNote } from './noteFormat'
 
 // ──────────────────────────────────────────────
 // Metadata parsing
@@ -116,6 +116,211 @@ export function modifyNoteAt(
 }
 
 // ──────────────────────────────────────────────
+// Chord operations
+// ──────────────────────────────────────────────
+
+/**
+ * Parse the L: default note length field ("1/8", "1/4", etc.) to a
+ * fractional whole-note value (0.125, 0.25, …).
+ */
+export function parseLValue(l: string): number {
+  const m = l.match(/(\d+)\/(\d+)/)
+  if (m) return parseInt(m[1]) / parseInt(m[2])
+  const n = parseFloat(l)
+  return isNaN(n) ? 0.125 : n
+}
+
+/**
+ * Add a note token to an existing note or chord at [startChar, endChar).
+ * If the existing token is already a chord `[...]`, appends inside the brackets.
+ * Otherwise wraps both notes: `[oldToken newToken]`.
+ */
+export function addNoteToChord(
+  abc: string,
+  startChar: number,
+  endChar: number,
+  newToken: string
+): string {
+  const existing = abc.slice(startChar, endChar).trim()
+  let chordToken: string
+  if (existing.startsWith('[') && existing.endsWith(']')) {
+    chordToken = existing.slice(0, -1) + newToken + ']'
+  } else {
+    chordToken = '[' + existing + newToken + ']'
+  }
+  return abc.slice(0, startChar) + chordToken + abc.slice(endChar)
+}
+
+/**
+ * Parse individual note tokens out of the interior of a chord bracket.
+ * e.g. "^C2_E2G2" → [{token:"^C2"}, {token:"_E2"}, {token:"G2"}]
+ */
+function parseChordTokens(inside: string): string[] {
+  const tokens: string[] = []
+  let i = 0
+  while (i < inside.length) {
+    const start = i
+    // accidentals: ^, ^^, _, __, =
+    while (i < inside.length && (inside[i] === '^' || inside[i] === '_' || inside[i] === '=')) i++
+    if (i >= inside.length || !/[A-Ga-g]/.test(inside[i])) { i++; continue }
+    i++ // note letter
+    while (i < inside.length && (inside[i] === ',' || inside[i] === "'")) i++ // octave marks
+    while (i < inside.length && /[\d/]/.test(inside[i])) i++ // length
+    if (i < inside.length && inside[i] === '>') i++ // broken rhythm marker
+    tokens.push(inside.slice(start, i))
+  }
+  return tokens
+}
+
+/** Parse an ABC note token like "^C2" or "c'" back to {note, octave}. */
+function abcTokenToNoteOctave(token: string): { note: string; octave: number } | null {
+  let i = 0
+  while (i < token.length && '^_='.includes(token[i])) i++
+  if (i >= token.length || !/[A-Ga-g]/.test(token[i])) return null
+  const letter = token[i]; i++
+  const isLower = letter !== letter.toUpperCase()
+  let octave = isLower ? 5 : 4
+  while (i < token.length && token[i] === ',') { octave--; i++ }
+  while (i < token.length && token[i] === "'") { octave++; i++ }
+  return { note: letter.toUpperCase(), octave }
+}
+
+/**
+ * Transpose one specific pitch (targetNote + targetOctave) inside a chord at
+ * [startChar, endChar) by `steps` diatonic steps.  All other pitches are left
+ * unchanged.  Returns the updated ABC string plus the new note + octave of the
+ * transposed pitch so the caller can update its selection state.
+ *
+ * Falls back to a full-element transpose when the element is not a chord.
+ */
+export function transposeNoteInChord(
+  abc: string,
+  startChar: number,
+  endChar: number,
+  targetNote: string,
+  targetOctave: number,
+  steps: number,
+): { abc: string; newNote: string; newOctave: number } {
+  const raw = abc.slice(startChar, endChar)
+  const bracketIdx = raw.indexOf('[')
+  if (bracketIdx === -1) {
+    return {
+      abc: transposeNoteAt(abc, startChar, endChar, steps),
+      newNote: targetNote,
+      newOctave: targetOctave,
+    }
+  }
+
+  const decorPrefix = raw.slice(0, bracketIdx)
+  const closeIdx = raw.lastIndexOf(']')
+  const inside = raw.slice(bracketIdx + 1, closeIdx)
+  const suffix = raw.slice(closeIdx + 1)
+
+  const tokens = parseChordTokens(inside)
+  const targetAbc = pitchToAbcNote(targetNote, targetOctave, null)
+
+  let newNote = targetNote
+  let newOctave = targetOctave
+
+  const newTokens = tokens.map(t => {
+    const stripped = t.replace(/^[_^=]+/, '')
+    if (stripped.startsWith(targetAbc)) {
+      const transposed = transposeNoteText(t, steps)
+      const parsed = abcTokenToNoteOctave(transposed)
+      if (parsed) { newNote = parsed.note; newOctave = parsed.octave }
+      return transposed
+    }
+    return t
+  })
+
+  const newChord = decorPrefix + '[' + newTokens.join('') + ']' + suffix
+  return {
+    abc: abc.slice(0, startChar) + newChord + abc.slice(endChar),
+    newNote,
+    newOctave,
+  }
+}
+
+/**
+ * Delete a specific pitch (identified by note letter + octave) from a chord at
+ * [startChar, endChar). If the chord collapses to one note, unwraps the brackets.
+ * If the element is not a chord, falls through to deleteElementAt.
+ */
+export function deleteNoteFromChord(
+  abc: string,
+  startChar: number,
+  endChar: number,
+  targetNote: string,
+  targetOctave: number,
+): string {
+  const raw = abc.slice(startChar, endChar)
+  const bracketIdx = raw.indexOf('[')
+  if (bracketIdx === -1) return deleteElementAt(abc, startChar, endChar)
+
+  const decorPrefix = raw.slice(0, bracketIdx)
+  const closeIdx = raw.lastIndexOf(']')
+  const inside = raw.slice(bracketIdx + 1, closeIdx)
+  const suffix = raw.slice(closeIdx + 1)   // any length modifier after ]
+
+  const tokens = parseChordTokens(inside)
+  if (tokens.length <= 1) return deleteElementAt(abc, startChar, endChar)
+
+  const targetAbc = pitchToAbcNote(targetNote, targetOctave, null)
+  const filtered = tokens.filter(t => {
+    const stripped = t.replace(/^[_^=]+/, '')
+    return !stripped.startsWith(targetAbc)
+  })
+
+  if (filtered.length === tokens.length) return deleteElementAt(abc, startChar, endChar)
+
+  let newToken: string
+  if (filtered.length === 0) {
+    return deleteElementAt(abc, startChar, endChar)
+  } else if (filtered.length === 1) {
+    newToken = decorPrefix + filtered[0] + suffix
+  } else {
+    newToken = decorPrefix + '[' + filtered.join('') + ']' + suffix
+  }
+
+  return abc.slice(0, startChar) + newToken + abc.slice(endChar)
+}
+
+/**
+ * Return all !decoration! prefixes found at the start of the token at
+ * [startChar, endChar), as absolute char positions in `abc`.
+ */
+export function findDecorationsInRange(
+  abc: string,
+  startChar: number,
+  endChar: number,
+): Array<{ name: string; start: number; end: number }> {
+  const result: Array<{ name: string; start: number; end: number }> = []
+  let i = startChar
+  while (i < endChar && abc[i] === '!') {
+    const close = abc.indexOf('!', i + 1)
+    if (close === -1 || close >= endChar) break
+    result.push({ name: abc.slice(i + 1, close), start: i, end: close + 1 })
+    i = close + 1
+  }
+  return result
+}
+
+/**
+ * Remove a single decoration token at [decorationStart, decorationEnd) and
+ * clean up any resulting double space.
+ */
+export function deleteDecoration(
+  abc: string,
+  decorationStart: number,
+  decorationEnd: number,
+): string {
+  const before = abc.slice(0, decorationStart)
+  const after  = abc.slice(decorationEnd)
+  // If we leave a double space, compress it
+  return (before + after).replace(/  +/g, ' ')
+}
+
+// ──────────────────────────────────────────────
 // Decorations
 // ──────────────────────────────────────────────
 
@@ -144,6 +349,168 @@ export function addSlur(abc: string, startChar: number, endChar: number): string
 
 export function addTie(abc: string, endChar: number): string {
   return abc.slice(0, endChar) + '-' + abc.slice(endChar)
+}
+
+// ──────────────────────────────────────────────
+// Beaming
+// ──────────────────────────────────────────────
+
+/**
+ * Return the beam-group duration (in fractional whole notes) for a time signature string.
+ * Notes shorter than a quarter in the same beam group are beamed together (no space).
+ */
+function getBeamGroupDuration(timeSig: string): number {
+  if (timeSig === 'C')  return 0.5   // common time = 4/4, beam in half-note groups
+  if (timeSig === 'C|') return 0.5   // cut time = 2/2
+  const m = timeSig.match(/^(\d+)\/(\d+)$/)
+  if (!m) return 0.25
+  const num = parseInt(m[1])
+  const den = parseInt(m[2])
+  // Compound meters (6/8, 9/8, 12/8 …): beam in dotted-quarter groups
+  if (num % 3 === 0 && num >= 6) return 3 / den
+  // 3/8: entire measure is one beam group (3 eighths = one compound beat)
+  if (num === 3 && den === 8) return 3 / 8
+  // 4/4 and 2/2: beam across two beats (half-note group)
+  if ((num === 4 && den === 4) || (num === 2 && den === 2)) return 0.5
+  // All other simple meters: one beat per group
+  return 1 / den
+}
+
+/**
+ * Re-apply correct beaming to every voice in `abc` according to the time signature.
+ *
+ * In abcjs's parse output, consecutive note tokens have no gap between them:
+ * each note's endChar === next note's startChar. The beam-break is encoded as a
+ * TRAILING SPACE at position `abc[prev.endChar - 1]` within the previous note's range.
+ * Removing that trailing space beams two notes; inserting a space at `prev.endChar`
+ * breaks the beam.
+ *
+ * Rules:
+ *  - Notes shorter than a quarter (duration < 0.25 whole notes) AND in the same
+ *    beat group → beamed (no trailing space on the preceding note).
+ *  - All other adjacent pairs → space between them (beam break).
+ *  - Rests (`el.rest` is defined in abcjs) always break a beam.
+ *  - If there is a gap between token ranges (decorations, inline fields), leave untouched.
+ */
+export function autoBeaming(abc: string): string {
+  const tunes = abcjs.parseOnly(abc)
+  if (!tunes?.[0]) return abc
+
+  const tune = tunes[0] as unknown as {
+    lines: Array<{
+      staff?: Array<{
+        voices?: Array<Array<{
+          el_type: string
+          duration?: number
+          startChar: number
+          endChar: number
+          rest?: object
+        }>>
+      }>
+    }>
+  }
+
+  const timeSig = abc.match(/^M:(.+)$/m)?.[1]?.trim() ?? '4/4'
+  const defaultBeamGroupDur = getBeamGroupDuration(timeSig)
+  const EPS = 1e-9
+
+  // Whether the beat unit is a quarter note (*/4 meters).
+  // In these meters, if any note in the measure is a 16th or shorter,
+  // we shrink the beam group to one quarter-note beat (0.25).
+  const isQuarterBeatMeter = /\/4$/.test(timeSig) || timeSig === 'C'
+  const SIXTEENTH = 0.0625   // 1/16 whole note
+
+  // Each edit is either: remove char at `pos`, or insert ' ' at `pos`
+  const edits: Array<{ pos: number; remove: boolean }> = []
+
+  type El = { el_type: string; duration?: number; startChar: number; endChar: number; rest?: object }
+
+  const processMeasure = (notes: El[], cum0: number, beamGroupDur: number) => {
+    let cum = cum0
+    let prev: { el: El; cumBefore: number } | null = null
+
+    for (const el of notes) {
+      const cumBefore = cum
+      cum += el.duration ?? 0
+
+      if (el.rest) { prev = null; continue }
+
+      if (prev) {
+        if (prev.el.endChar !== el.startChar) { prev = { el, cumBefore }; continue }
+
+        const prevGroup  = Math.floor((prev.cumBefore + EPS) / beamGroupDur)
+        const currGroup  = Math.floor((cumBefore        + EPS) / beamGroupDur)
+        const prevShort  = (prev.el.duration ?? 0) < 0.25 - EPS
+        const currShort  = (el.duration        ?? 0) < 0.25 - EPS
+        const shouldBeam = prevGroup === currGroup && prevShort && currShort
+
+        const breakPos = prev.el.endChar - 1
+        const hasBreak = breakPos >= prev.el.startChar && abc[breakPos] === ' '
+
+        if (shouldBeam && hasBreak) {
+          edits.push({ pos: breakPos, remove: true })
+        } else if (!shouldBeam && !hasBreak) {
+          edits.push({ pos: prev.el.endChar, remove: false })
+        }
+      }
+
+      prev = { el, cumBefore }
+    }
+  }
+
+  const processVoice = (voice: El[]) => {
+    // Split into measures so we can inspect each measure's note values
+    let measureNotes: El[] = []
+
+    const flushMeasure = () => {
+      if (measureNotes.length === 0) return
+
+      // Determine effective beam group for this measure
+      let beamGroupDur = defaultBeamGroupDur
+      if (isQuarterBeatMeter && defaultBeamGroupDur > 0.25) {
+        // If any non-rest note is shorter than an eighth (i.e. 16th or smaller),
+        // collapse to one-beat (quarter-note) beam groups
+        const hasFast = measureNotes.some(
+          el => !el.rest && (el.duration ?? 1) < 0.125 - EPS
+        )
+        if (hasFast) beamGroupDur = 0.25
+      }
+
+      processMeasure(measureNotes, 0, beamGroupDur)
+      measureNotes = []
+    }
+
+    for (const el of voice) {
+      if (el.el_type === 'bar') { flushMeasure(); continue }
+      if (el.el_type !== 'note') continue
+      measureNotes.push(el)
+    }
+    flushMeasure()
+  }
+
+  for (const line of tune.lines ?? []) {
+    for (const staff of line.staff ?? []) {
+      for (const voice of staff.voices ?? []) {
+        processVoice(voice as El[])
+      }
+    }
+  }
+
+  if (edits.length === 0) return abc
+
+  // Deduplicate by position, apply right-to-left so earlier offsets stay valid
+  const unique = [...new Map(edits.map(e => [e.pos, e])).values()]
+  unique.sort((a, b) => b.pos - a.pos)
+
+  let result = abc
+  for (const edit of unique) {
+    if (edit.remove) {
+      result = result.slice(0, edit.pos) + result.slice(edit.pos + 1)
+    } else {
+      result = result.slice(0, edit.pos) + ' ' + result.slice(edit.pos)
+    }
+  }
+  return result
 }
 
 // ──────────────────────────────────────────────

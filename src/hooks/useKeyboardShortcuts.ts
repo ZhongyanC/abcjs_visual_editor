@@ -1,7 +1,28 @@
 import { useEffect, useCallback } from 'react'
 import { useEditorStore } from '../store/editorStore'
-import type { Duration } from '../types/editor'
-import { insertNoteAt, deleteElementAt, transposeNoteAt, autoBarlines } from '../utils/abcStringOps'
+import type { Duration, SelectedElement } from '../types/editor'
+import {
+  insertNoteAt, deleteElementAt, transposeNoteAt, autoBarlines, autoBeaming,
+  deleteNoteFromChord, deleteDecoration, transposeNoteInChord,
+} from '../utils/abcStringOps'
+
+/** Transpose a selected note or a specific chord pitch, keeping selection state in sync. */
+function applyTranspose(
+  sel: SelectedElement,
+  abc: string,
+  steps: number,
+  setAbcNotation: (s: string) => void,
+  setSelectedElement: (el: SelectedElement) => void,
+) {
+  if (sel.chordNote) {
+    const { note, octave } = sel.chordNote
+    const result = transposeNoteInChord(abc, sel.startChar, sel.endChar, note, octave, steps)
+    setAbcNotation(result.abc)
+    setSelectedElement({ ...sel, chordNote: { note: result.newNote, octave: result.newOctave } })
+  } else {
+    setAbcNotation(transposeNoteAt(abc, sel.startChar, sel.endChar, steps))
+  }
+}
 
 const DURATION_KEYS: Record<string, Duration> = {
   '1': 'whole',
@@ -35,7 +56,7 @@ export function useKeyboardShortcuts(
       inputMode, inputDuration, inputDot, inputRest,
       abcNotation, cursorChar, selectedElement,
       undo, redo, canUndo, canRedo,
-      setAbcNotation, setInputMode, setInputDuration,
+      setAbcNotation, setSelectedElement, setInputMode, setInputDuration,
       setInputDot, setInputRest,
     } = useEditorStore.getState()
 
@@ -77,37 +98,49 @@ export function useKeyboardShortcuts(
 
     if (e.key === 'ArrowUp' && e.altKey) {
       if (selectedElement && selectedElement.startChar >= 0) {
-        setAbcNotation(transposeNoteAt(abcNotation, selectedElement.startChar, selectedElement.endChar, -7))
         e.preventDefault()
+        applyTranspose(selectedElement, abcNotation, -7, setAbcNotation, setSelectedElement)
       }
       return
     }
     if (e.key === 'ArrowDown' && e.altKey) {
       if (selectedElement && selectedElement.startChar >= 0) {
-        setAbcNotation(transposeNoteAt(abcNotation, selectedElement.startChar, selectedElement.endChar, 7))
         e.preventDefault()
+        applyTranspose(selectedElement, abcNotation, 7, setAbcNotation, setSelectedElement)
       }
       return
     }
     if (e.key === 'ArrowUp') {
       if (selectedElement && selectedElement.startChar >= 0) {
-        setAbcNotation(transposeNoteAt(abcNotation, selectedElement.startChar, selectedElement.endChar, -1))
         e.preventDefault()
+        applyTranspose(selectedElement, abcNotation, -1, setAbcNotation, setSelectedElement)
       }
       return
     }
     if (e.key === 'ArrowDown') {
       if (selectedElement && selectedElement.startChar >= 0) {
-        setAbcNotation(transposeNoteAt(abcNotation, selectedElement.startChar, selectedElement.endChar, 1))
         e.preventDefault()
+        applyTranspose(selectedElement, abcNotation, 1, setAbcNotation, setSelectedElement)
       }
       return
     }
 
     if ((e.key === 'Delete' || e.key === 'Backspace') && !e.ctrlKey) {
       if (selectedElement && selectedElement.startChar >= 0) {
-        setAbcNotation(deleteElementAt(abcNotation, selectedElement.startChar, selectedElement.endChar))
         e.preventDefault()
+        if (selectedElement.isDecoration &&
+            selectedElement.decorationStart !== undefined &&
+            selectedElement.decorationEnd   !== undefined) {
+          // Delete only the decoration symbol, keep the note
+          setAbcNotation(deleteDecoration(abcNotation, selectedElement.decorationStart, selectedElement.decorationEnd))
+        } else if (selectedElement.chordNote) {
+          // Delete specific pitch from chord
+          const { note, octave } = selectedElement.chordNote
+          setAbcNotation(autoBeaming(deleteNoteFromChord(abcNotation, selectedElement.startChar, selectedElement.endChar, note, octave)))
+        } else {
+          // Delete the whole element (note, rest, bar, etc.)
+          setAbcNotation(autoBeaming(deleteElementAt(abcNotation, selectedElement.startChar, selectedElement.endChar)))
+        }
       }
       return
     }
@@ -118,7 +151,7 @@ export function useKeyboardShortcuts(
       const note = e.key.toUpperCase()
       const octave = guessOctave(e.key)
       const insertPos = cursorChar >= 0 ? cursorChar : abcNotation.length
-      setAbcNotation(autoBarlines(insertNoteAt(abcNotation, insertPos, note, octave, inputDuration, inputDot, null, inputRest)))
+      setAbcNotation(autoBeaming(autoBarlines(insertNoteAt(abcNotation, insertPos, note, octave, inputDuration, inputDot, null, inputRest))))
       return
     }
 
@@ -126,7 +159,7 @@ export function useKeyboardShortcuts(
     if (inputMode === 'note-input' && (e.key === 'z' || e.key === 'Z')) {
       e.preventDefault()
       const insertPos = cursorChar >= 0 ? cursorChar : abcNotation.length
-      setAbcNotation(autoBarlines(insertNoteAt(abcNotation, insertPos, 'C', 4, inputDuration, inputDot, null, true)))
+      setAbcNotation(autoBeaming(autoBarlines(insertNoteAt(abcNotation, insertPos, 'C', 4, inputDuration, inputDot, null, true))))
       return
     }
   }, [guessOctave, isTextEditorFocused])

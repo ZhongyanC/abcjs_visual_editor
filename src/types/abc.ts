@@ -48,6 +48,7 @@ export interface PositionedElement {
   type: string
   voiceIndex: number
   measureNum: number
+  duration?: number  // fractional whole notes (from abcjs absEl.abcelem.duration)
 }
 
 // Maps duration enum to ABC notation length multipliers relative to L: (default L:1/8)
